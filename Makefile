@@ -71,6 +71,18 @@ build/%.o: $(GDKGBA)/%.c
 $(HAL)/libhal.a:
 	$(MAKE) -C $(HAL)
 
+# gdkGBA patches. Applied as a one-shot to the submodule because
+# our scev_* extensions (arm_skip_bios, IRQ-fire counters, IWRAM
+# write tracker) need to live INSIDE vendor/gdkGBA/ — they touch
+# static state that has no public accessor. Marker file means
+# don't re-apply on every build. To clear: rm vendor/gdkGBA/.patched
+$(GDKGBA)/.patched: patches/01-scev-skip-bios-and-irq-counters.patch
+	cd $(GDKGBA) && git apply ../../patches/01-scev-skip-bios-and-irq-counters.patch
+	@touch $@
+	@echo "patches: applied scev extensions to $(GDKGBA)"
+
+$(GDKGBA_OBJS): $(GDKGBA)/.patched
+
 firmware.elf: $(OBJS) $(HAL)/libhal.a
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(HAL)/libhal.a
 

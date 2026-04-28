@@ -1,0 +1,113 @@
+diff --git a/arm.c b/arm.c
+index 6ee9b27..ceaf862 100644
+--- a/arm.c
++++ b/arm.c
+@@ -3265,13 +3265,44 @@ void arm_int(uint32_t address, int8_t mode) {
+     arm_load_pipe();
+ }
+ 
++extern volatile uint32_t scev_irq_armint;
+ void arm_check_irq() {
+     if (!arm_flag_tst(ARM_I) &&
+         (int_enb_m.w & 1) &&
+-        (int_enb.w & int_ack.w))
++        (int_enb.w & int_ack.w)) {
++        scev_irq_armint++;          /* SCEV diag */
+         arm_int(ARM_VEC_IRQ, ARM_IRQ);
++    }
+ }
+ 
+ void arm_reset() {
+     arm_int(ARM_VEC_RESET, ARM_SVC);
++}
++
++/* SCEV: skip-BIOS boot. Sets registers to the post-splash state
++ * documented in GBATEK §3.2 and reloads the pipeline from the cart
++ * entry point. Used by the bare-metal port to avoid the BIOS splash
++ * (which currently hangs on at least one cart we've tested under
++ * upstream gdkGBA — under investigation; this gets games running
++ * meanwhile).
++ *
++ * Mirrors mGBA / VBA / no$gba's "skip BIOS" flow. */
++void arm_skip_bios(void) {
++    for (int i = 0; i < 16; i++) arm_r.r[i] = 0;
++    /* Banked stacks for the modes the cart will switch through. */
++    arm_r.r13_usr = 0x03007F00;
++    arm_r.r13_irq = 0x03007FA0;
++    arm_r.r13_svc = 0x03007FE0;
++    arm_r.r14_usr = 0;
++    arm_r.r14_irq = 0;
++    arm_r.r14_svc = 0;
++    arm_r.cpsr    = 0x0000001F;   /* system mode, IRQs enabled, ARM */
++    /* Active r[13] mirrors the bank for the current mode (system →
++     * uses the user bank). Without this the cart's first dozen
++     * instructions run with sp=0 and any stack op writes to BIOS /
++     * 0-region, which silently corrupts state. */
++    arm_r.r[13]   = arm_r.r13_usr;
++    arm_r.r[14]   = arm_r.r14_usr;
++    arm_r.r[15]   = 0x08000000;
++    arm_load_pipe();              /* fetch the cart's entry instr pair */
+ }
+\ No newline at end of file
+diff --git a/arm.h b/arm.h
+index ad83c0e..0f61867 100644
+--- a/arm.h
++++ b/arm.h
+@@ -118,4 +118,5 @@ void arm_int(uint32_t address, int8_t mode);
+ 
+ void arm_check_irq();
+ 
+-void arm_reset();
+\ No newline at end of file
++void arm_reset();
++void arm_skip_bios(void);
+\ No newline at end of file
+diff --git a/arm_mem.c b/arm_mem.c
+index 911a51e..35f1bdb 100644
+--- a/arm_mem.c
++++ b/arm_mem.c
+@@ -266,8 +266,20 @@ static void wram_write(uint32_t address, uint8_t value) {
+     wram[address & 0x3ffff] = value;
+ }
+ 
++/* SCEV diag: count writes to the IWRAM tail region (0x7F00-0x7FFF)
++ * — the BIOS scratchpad / IRQ flags. If trigger=N per second but
++ * scev_iwram_top_writes stays 0, BIOS isn't touching the standard
++ * 0x03007FF8 location and is using a different mechanism. */
++extern volatile uint32_t scev_iwram_top_writes;
++extern volatile uint16_t scev_iwram_last_addr;
++extern volatile uint8_t  scev_iwram_last_val;
+ static void iwram_write(uint32_t address, uint8_t value) {
+     iwram[address & 0x7fff] = value;
++    if ((address & 0x7fff) >= 0x7F00) {
++        scev_iwram_top_writes++;
++        scev_iwram_last_addr = (uint16_t)(address & 0xFFFF);
++        scev_iwram_last_val  = value;
++    }
+ }
+ 
+ static void pram_write(uint32_t address, uint8_t value) {
+diff --git a/io.c b/io.c
+index a658e2a..8e86eef 100644
+--- a/io.c
++++ b/io.c
+@@ -733,8 +733,19 @@ void io_write(uint32_t address, uint8_t value) {
+     }
+ }
+ 
++/* SCEV: instrument — counts trigger_irq calls + records mask of
++ * flags ever requested. Read by main.c via scev_irq_count /
++ * scev_irq_mask externs. Not part of upstream gdkGBA. */
++volatile uint32_t scev_irq_count = 0;
++volatile uint32_t scev_irq_mask  = 0;
++volatile uint32_t scev_irq_armint = 0;
++volatile uint32_t scev_iwram_top_writes = 0;
++volatile uint16_t scev_iwram_last_addr  = 0;
++volatile uint8_t  scev_iwram_last_val   = 0;
+ void trigger_irq(uint16_t flag) {
+     int_ack.w |= flag;
++    scev_irq_count++;
++    scev_irq_mask |= flag;
+ 
+     int_halt = false;
+ 
