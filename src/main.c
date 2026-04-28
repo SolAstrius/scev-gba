@@ -126,16 +126,32 @@ static void on_key(uint8_t usage, bool pressed, void *ctx) {
     else         host_key_mask |=  bit;
 }
 
-/* ===== gfx blit (×4 BGRA → vram XRGB) ====================== */
+/* ===== gfx blit (×4 gdkGBA → vram XRGB) ===================== */
 /*
- * gdkGBA writes 32-bit BGRA per pixel (B in low byte). Bochs/RVVM's
- * gfx surface is XRGB8888 (R in high byte) when GFX_FMT_XRGB8888.
- * Same R↔B swap pattern as game-boy/main.c. Hot loop, so each
- * source pixel is unrolled into 16 destination stores (×4 scale). */
+ * gdkGBA's pixel format (see arm_mem.c, the PRAM-write path) packs
+ * a uint32 as:
+ *   bits  0..7  = 0xFF   (alpha, ignored downstream)
+ *   bits  8..15 = R 5→8 (replicated MSBs of GBA's 5-bit channel)
+ *   bits 16..23 = G 5→8
+ *   bits 24..31 = B 5→8
+ * On little-endian RV that's bytes A,R,G,B in memory — gdkGBA's
+ * SDL frontend declares it BGRA8888 because SDL's `BGRA8888`
+ * convention on LE is byte-order B,G,R,A which would be the
+ * uint32 0xAARRGGBB. So either gdkGBA's SDL format spec is mis-
+ * labelled or SDL has a quirk; either way the actual uint32 we
+ * pull out of `screen` matches the layout above (verified by
+ * eyeballing palette writes against rendered output).
+ *
+ * Bochs/RVVM's XRGB8888 surface wants uint32 = 0x__RRGGBB
+ * (bits 16..23 = R, 8..15 = G, 0..7 = B).
+ *
+ * So the transform is: rotate-right-by-8 (or equivalently, pull
+ * R/G/B out of bits 8/16/24 and pack into 16/8/0).
+ *
+ * Hot loop — ×4 inner unrolled into 16 stores per source pixel. */
 static void blit_frame(uint32_t x_off, uint32_t y_off) {
     uint32_t *vram   = g.vram;
     uint32_t  stride = g.stride_px;
-    bool      need_swap = (g.format == GFX_FMT_XRGB8888);
 
     for (uint32_t y = 0; y < GBA_H; y++) {
         uint32_t  base = (y_off + y * GBA_SCALE) * stride + x_off;
@@ -146,21 +162,11 @@ static void blit_frame(uint32_t x_off, uint32_t y_off) {
         const uint32_t *src = (const uint32_t *)&fb_bgra[y * GBA_W * 4];
 
         for (uint32_t x = 0; x < GBA_W; x++) {
-            uint32_t c = src[x] & 0x00FFFFFFu;
-            if (need_swap) {
-                /* BGRA8888 in src → XRGB8888 in dst.
-                 * src layout: B in bits 0:7, G 8:15, R 16:23.
-                 * dst wants:  R in bits 16:23 already (matches!).
-                 * Wait — gdkGBA's texture format is BGRA8888 from
-                 * SDL's perspective, which on little-endian = bytes
-                 * [B,G,R,A] = uint32 0xAARRGGBB. So R is already in
-                 * bits 16:23. No swap needed for XRGB8888 dst.
-                 * Setting need_swap=false here just to be safe — */
-                uint32_t r = (c >> 16) & 0xFF;
-                uint32_t g_ = (c >>  8) & 0xFF;
-                uint32_t b = (c >>  0) & 0xFF;
-                c = (r << 16) | (g_ << 8) | b;
-            }
+            uint32_t s = src[x];
+            uint32_t r = (s >>  8) & 0xFF;
+            uint32_t g_= (s >> 16) & 0xFF;
+            uint32_t b = (s >> 24) & 0xFF;
+            uint32_t c = (r << 16) | (g_ << 8) | b;
             uint32_t dx = x * GBA_SCALE;
             r0[dx] = r0[dx+1] = r0[dx+2] = r0[dx+3] = c;
             r1[dx] = r1[dx+1] = r1[dx+2] = r1[dx+3] = c;
