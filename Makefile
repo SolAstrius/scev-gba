@@ -98,6 +98,22 @@ endef
 # controller 2 if provided.
 BIOS ?= roms/gba_bios.bin
 
+# Sector-pad helper. RVVM's nvme reports `floor(file_size / 512)`
+# LBAs, which truncates ROMs that aren't a multiple of 512 bytes —
+# tested with the 1300-byte hello.gba homebrew, where the trailing
+# 276 bytes (font glyph table) got lost and corrupted the rendered
+# text. Run this against any ROM before `make run` to round it up
+# to an LBA boundary in place. Real commercial GBA carts are 4-32
+# MiB and naturally aligned, so this is mostly a homebrew concern.
+define ENSURE_SECTOR_ALIGNED
+	@orig=$$(stat -c %s "$(1)"); \
+	pad=$$(( (orig + 511) & ~511 )); \
+	if [ $$pad -ne $$orig ]; then \
+	    dd if=/dev/zero bs=1 count=$$((pad - orig)) >> "$(1)" status=none; \
+	    echo "rom: padded $(1) $$orig → $$pad bytes"; \
+	fi
+endef
+
 # NVMe slot order matters: cart on 0, BIOS on 1, save on 2 (if any).
 # Mirrors how the firmware will discover them via nvme_init_nth().
 NVME_FLAGS := -nvme $(ROM)
@@ -111,12 +127,16 @@ endif
 run: firmware.bin
 	@test -f "$(ROM)"  || { echo "missing $(ROM); set ROM=path/to/cart.gba"; exit 1; }
 	@test -f "$(BIOS)" || { echo "missing $(BIOS); GBA needs a real BIOS at roms/gba_bios.bin"; exit 1; }
+	$(call ENSURE_SECTOR_ALIGNED,$(ROM))
+	$(call ENSURE_SECTOR_ALIGNED,$(BIOS))
 	$(ENSURE_SAVE)
 	$(RVVM) firmware.bin -bochs_display -nonet -hda_test $(NVME_FLAGS)
 
 run-headless: firmware.bin
 	@test -f "$(ROM)"  || { echo "missing $(ROM); set ROM=path/to/cart.gba"; exit 1; }
 	@test -f "$(BIOS)" || { echo "missing $(BIOS); GBA needs a real BIOS at roms/gba_bios.bin"; exit 1; }
+	$(call ENSURE_SECTOR_ALIGNED,$(ROM))
+	$(call ENSURE_SECTOR_ALIGNED,$(BIOS))
 	$(ENSURE_SAVE)
 	$(RVVM) firmware.bin -nogui -nonet -hda_test $(NVME_FLAGS)
 
@@ -125,6 +145,8 @@ run-headless: firmware.bin
 run-noaudio: firmware.bin
 	@test -f "$(ROM)"  || { echo "missing $(ROM); set ROM=path/to/cart.gba"; exit 1; }
 	@test -f "$(BIOS)" || { echo "missing $(BIOS); GBA needs a real BIOS at roms/gba_bios.bin"; exit 1; }
+	$(call ENSURE_SECTOR_ALIGNED,$(ROM))
+	$(call ENSURE_SECTOR_ALIGNED,$(BIOS))
 	$(RVVM) firmware.bin -bochs_display -nonet $(NVME_FLAGS)
 
 clean:
