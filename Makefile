@@ -152,6 +152,21 @@ run-headless: firmware.bin
 	$(ENSURE_SAVE)
 	$(RVVM) firmware.bin -nogui -nonet -hda_test $(NVME_FLAGS)
 
+# `make run-zip ZIP=path/to/game.zip` — extract the first .gba inside
+# the zip into roms/, sector-pad it, and run normally. Saves the
+# extract + rename + run dance for shared ROMs that ship as zips.
+run-zip: firmware.bin
+	@test -f "$(ZIP)" || { echo "missing $(ZIP); set ZIP=path/to/cart.zip"; exit 1; }
+	@test -f "$(BIOS)" || { echo "missing $(BIOS); GBA needs a real BIOS at roms/gba_bios.bin"; exit 1; }
+	@mkdir -p roms
+	@gba=$$(unzip -Z1 "$(ZIP)" '*.gba' 2>/dev/null | head -1); \
+	 test -n "$$gba" || { echo "no .gba inside $(ZIP)"; exit 1; }; \
+	 base=$$(basename "$$gba" .gba | tr ' ()[],.' '_______' | sed 's/__*/_/g; s/^_//; s/_$$//'); \
+	 out="roms/$$base.gba"; \
+	 unzip -p "$(ZIP)" "$$gba" > "$$out"; \
+	 echo "extracted: $$out"; \
+	 $(MAKE) run ROM="$$out"
+
 # `make run-noaudio` — quicker boot, no HDA. Useful while iterating
 # on the video / shim path without ALSA in the loop.
 run-noaudio: firmware.bin
@@ -165,4 +180,4 @@ clean:
 	rm -rf build firmware.elf firmware.bin
 	$(MAKE) -C $(HAL) clean
 
-.PHONY: all run run-headless run-noaudio clean
+.PHONY: all run run-headless run-noaudio run-zip clean
