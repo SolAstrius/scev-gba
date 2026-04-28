@@ -38,6 +38,12 @@
 #include "io.h"
 #include "video.h"
 
+/* arm.h declares arm_r as `arm_regs_e arm_r;` — the register file
+ * the CPU executes against. r[15] = PC. We snapshot it once per
+ * prof window for diagnostic. */
+/* arm_r is declared (not extern) in arm.h — under -fcommon the
+ * tentative-definition merges across TUs. */
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -269,8 +275,12 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
      * subsequent run_frame() calls. */
     screen = fb_bgra;
 
-    arm_reset();
-    uart_puts("Running.\n\n");
+    /* Skip-BIOS mode (workaround — see KNOWN_ISSUES). Bypass the
+     * BIOS splash, jump straight to cart entry. arm_skip_bios sets
+     * registers per GBATEK §3.2 BIOS-reset-defaults, reloads the
+     * pipeline from 0x08000000, and leaves IRQs enabled in CPSR. */
+    arm_skip_bios();
+    uart_puts("Running (skip-BIOS, jumping to cart entry @ 0x08000000).\n\n");
 
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;
@@ -305,12 +315,50 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         if (++prof_iters >= 60) {
             uint64_t window = t3 - prof_window;
             #define US(t) ((uint64_t)((t) / 10))
-            uart_printf("[prof] iters=%u wall=%ums | run=%uus blit=%uus pace=%uus\n",
-                        (uint64_t)prof_iters,
-                        US(window) / 1000,
-                        US(prof_run)  / prof_iters,
-                        US(prof_blit) / prof_iters,
-                        US(prof_pace) / prof_iters);
+            /* PC snapshot at window end. If the cart is stuck waiting
+             * on a SWI (VBlankIntrWait, Halt, etc.) the PC will hover
+             * at a bios-resident address (in 0x000–0x3FFF range);
+             * if it's running cart code it'll be in 0x08000000+. */
+            extern uint16_t disp_cnt_w;  /* mode + bg/obj enable */
+            /* CPSR I bit (bit 7) = 1 means IRQs disabled in current
+             * mode. If CPSR mode is SVC (0x13) the cart called a SWI
+             * and is inside the BIOS handler. */
+            uint32_t cpsr   = arm_r.cpsr;
+            uint32_t mode   = cpsr & 0x1F;
+            uint32_t i_bit  = (cpsr >> 7) & 1;
+            extern volatile uint32_t scev_irq_count, scev_irq_mask, scev_irq_armint;
+            /* Dump the BIOS IntrWait completion var at IWRAM 0x7FF8.
+             * BIOS IRQ vector ORs fired IRQs here; IntrWait reads it
+             * to know which IRQs have arrived since wait started. If
+             * this stays 0 forever, BIOS IRQ vector isn't writing it
+             * — pointing at a memory-map / address-translation bug. */
+            extern uint8_t *iwram;
+            uint16_t intr_check = (uint16_t)iwram[0x7FF8] | ((uint16_t)iwram[0x7FF9] << 8);
+            uint32_t user_handler = ((uint32_t)iwram[0x7FFC]) |
+                                    ((uint32_t)iwram[0x7FFD] << 8) |
+                                    ((uint32_t)iwram[0x7FFE] << 16) |
+                                    ((uint32_t)iwram[0x7FFF] << 24);
+            /* IWRAM stack-area dump — BIOS uses the upper end as
+             * IRQ stack (sp_irq ~ 0x03007FA0). Non-zero bytes here
+             * means BIOS *is* using IWRAM, just not 0x7FF8. */
+            uart_printf("  tmr1 ctrl=%x count=%x reload=%x\n",
+                        (uint64_t)tmr[1].ctrl.w,
+                        (uint64_t)tmr[1].count.w,
+                        (uint64_t)tmr[1].reload.w);
+            uart_printf("[prof] pc=%x cpsr_mode=%x I=%u halt=%u | "
+                        "ie=%x if=%x ime=%x dispcnt=%x dispstat=%x "
+                        "intrchk=%x usrh=%x | "
+                        "trigger=%u(mask=%x) armint=%u\n",
+                        (uint64_t)arm_r.r[15],
+                        (uint64_t)mode, (uint64_t)i_bit,
+                        (uint64_t)(int_halt ? 1 : 0),
+                        (uint64_t)int_enb.w, (uint64_t)int_ack.w,
+                        (uint64_t)int_enb_m.w, (uint64_t)disp_cnt.w,
+                        (uint64_t)disp_stat.w,
+                        (uint64_t)intr_check, (uint64_t)user_handler,
+                        (uint64_t)scev_irq_count,
+                        (uint64_t)scev_irq_mask,
+                        (uint64_t)scev_irq_armint);
             #undef US
             prof_iters = 0;
             prof_run = prof_blit = prof_pace = 0;

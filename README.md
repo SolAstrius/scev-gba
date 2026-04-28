@@ -2,9 +2,10 @@
 
 Game Boy Advance (AGB / ARM7TDMI @ 16.78 MHz) on RVVM bare-metal.
 
-**Status: scaffold.** Boots the standard rvvm-hal init path
-(UART → FDT → PCI/I2C/time → HID → gfx) and halts in an HID-poll
-loop. mGBA integration is the next step.
+**Status: gdkGBA core wired, homebrew runs, commercial carts
+walk off ROM** — see `KNOWN_ISSUES.md` for the diagnostic. v1
+target was "scaffold", we got further than that; making FireRed
+boot wants either deeper gdkGBA debugging or a switch to mGBA.
 
 ## Why mGBA
 
