@@ -5,5 +5,6 @@ firmware.elf
 result
 *.o
 roms/*.gba
+roms/*.bin
 roms/*.sav
 saves/
