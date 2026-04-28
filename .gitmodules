@@ -2,6 +2,6 @@
 	path = vendor/rvvm-hal
 	url = https://github.com/SolAstrius/rvvm-hal.git
 	branch = master
-[submodule "vendor/mgba"]
-	path = vendor/mgba
-	url = https://github.com/mgba-emu/mgba.git
+[submodule "vendor/gdkGBA"]
+	path = vendor/gdkGBA
+	url = https://github.com/gdkchan/gdkGBA.git
