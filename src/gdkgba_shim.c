@@ -1,61 +1,53 @@
-/* gdkgba_shim — freestanding shim layer for gdkGBA.
+/* gdkgba_shim — bump allocator + tracer plumbing for gdkGBA.
  *
- * gdkGBA's core (arm.c, arm_mem.c, dma.c, io.c, sound.c, timer.c,
- * video.c) is much smaller-footprint than binjgb's was: arm.c uses
- * `malloc`/`free` for the boot-time memory regions, and that's it.
- * No printf, fread, fopen, qsort, etc. inside the core. We only
- * need to provide:
+ * Most of gdkGBA's libc needs are now satisfied by picolibc (vendored
+ * in rvvm-hal): mem/str helpers, exit/abort path, assert. Only the
+ * things picolibc can't reasonably provide for our use case live here:
  *
- *   malloc / calloc / realloc / free   bump allocator on a static
- *                                      pool. arm.c calls this 10×
- *                                      at boot for the GBA memory
- *                                      regions (BIOS, WRAM, ROM,
- *                                      etc.) and never frees during
- *                                      run, so the bump strategy
- *                                      fits perfectly. ~32.5 MiB
- *                                      total request across all
- *                                      arm_init() allocations.
+ *   §1  Bump allocator (malloc/calloc/realloc/free) — gdkGBA's
+ *       arm_init() requests ~32 MiB of memory regions at boot
+ *       (BIOS, WRAM, IWRAM, PRAM, VRAM, OAM, ROM, EEPROM, SRAM,
+ *       FLASH) and never frees. Our bump pool is 40 MiB; picolibc's
+ *       sbrk-fed nano-malloc would have to expand a HAL heap that
+ *       defaults to 16 MiB and would also pay per-block header
+ *       overhead. Keeping our own malloc/free means the link prefers
+ *       these over picolibc's libc.a equivalents.
  *
- *   exit / abort                       panic + wfi.
+ *   §2  exit() override — picolibc's exit walks __init_array /
+ *       __fini_array via linker symbols we don't define. Skip
+ *       straight to _exit() (wfi loop in
+ *       rvvm-hal/src/picolibc_hooks.c).
  *
- *   __assert_fail                      glibc-style; zig-cc emits
- *                                      this for assert() calls.
- *
- *   memchr / strlen / strcmp etc       not actually called by the
- *                                      gdkGBA core, but provided
- *                                      for safety in case some
- *                                      header drags them in.
- *
- * (sdl.c and main.c from gdkGBA are NOT compiled — they're the
- * frontend we replace with src/main.c + the rvvm-hal device
- * drivers. So we don't need printf or any file I/O surface here.) */
+ *   §3  Instruction tracer globals — main.c arms by writing
+ *       scev_trace_remaining; the patched arm_step / t16_step in
+ *       vendor/gdkGBA/ call scev_trace_cb. */
 
 #include <stdint.h>
 #include <stddef.h>
+#include <unistd.h>     /* _exit */
 
 #include "uart.h"
 
-/* ---------------------------------------------------------------- */
-/* Bump allocator.                                                   */
-/*                                                                   */
-/* Sized to fit gdkGBA's arm_init() footprint with comfortable        */
-/* slack:                                                             */
-/*   bios    16 KiB                                                   */
-/*   wram   256 KiB                                                   */
-/*   iwram   32 KiB                                                   */
-/*   pram     1 KiB                                                   */
-/*   vram    96 KiB                                                   */
-/*   oam      1 KiB                                                   */
-/*   rom   32768 KiB    ← dominates                                  */
-/*   eeprom   8 KiB                                                   */
-/*   sram    64 KiB                                                   */
-/*   flash  128 KiB                                                   */
-/*   ─────────────                                                    */
-/*   total ≈ 33152 KiB ≈ 32.4 MiB.                                   */
-/*                                                                    */
-/* Round to 40 MiB for headroom + per-alloc 16-byte alignment loss.  */
-/* The HAL link.ld bumps LENGTH to 256 MiB, so 40 MiB is fine.       */
-/* ---------------------------------------------------------------- */
+/* ====================================================================
+ * §1. Bump allocator.
+ *
+ * Sized to fit gdkGBA's arm_init() footprint with comfortable slack:
+ *   bios    16 KiB
+ *   wram   256 KiB
+ *   iwram   32 KiB
+ *   pram     1 KiB
+ *   vram    96 KiB
+ *   oam      1 KiB
+ *   rom   32768 KiB    ← dominates
+ *   eeprom   8 KiB
+ *   sram    64 KiB
+ *   flash  128 KiB
+ *   ─────────────
+ *   total ≈ 33152 KiB ≈ 32.4 MiB.
+ *
+ * Round to 40 MiB for headroom + per-alloc 16-byte alignment loss.
+ * The HAL link.ld bumps LENGTH to 256 MiB, so 40 MiB is fine.
+ * ==================================================================== */
 #define BUMP_POOL_BYTES   (40u * 1024u * 1024u)
 
 __attribute__((aligned(4096)))
@@ -98,13 +90,22 @@ void *realloc(void *old_ptr, size_t new_size) {
 size_t gdkgba_shim_used_bytes(void) { return bump_used; }
 size_t gdkgba_shim_pool_bytes(void) { return BUMP_POOL_BYTES; }
 
-/* ---------------------------------------------------------------- */
-/* Instruction tracer. Globals live here so the vendored arm_step / */
-/* t16_step (patched via patches/01-*.patch) can find them via the  */
-/* extern declarations there. main.c arms by writing                 */
-/* scev_trace_remaining = N. Format mirrors a mGBA `-l 0x4000` trace */
-/* well enough for hand-diffing.                                     */
-/* ---------------------------------------------------------------- */
+/* ====================================================================
+ * §2. exit() override
+ * ==================================================================== */
+__attribute__((noreturn))
+void exit(int status) {
+    _exit(status);
+}
+
+/* ====================================================================
+ * §3. Instruction tracer globals
+ *
+ * The vendored arm_step / t16_step (patched via patches/01-*.patch)
+ * find these via extern declarations there. main.c arms by writing
+ * scev_trace_remaining = N. Format mirrors a mGBA `-l 0x4000` trace
+ * well enough for hand-diffing.
+ * ==================================================================== */
 volatile int scev_trace_remaining = 0;
 
 static void scev_trace_default(int thumb, uint32_t pc, uint32_t op,
@@ -120,60 +121,3 @@ static void scev_trace_default(int thumb, uint32_t pc, uint32_t op,
 void (*scev_trace_cb)(int, uint32_t, uint32_t,
                       uint32_t, uint32_t, uint32_t, uint32_t,
                       uint32_t, uint32_t) = scev_trace_default;
-
-/* ---------------------------------------------------------------- */
-/* exit / abort / assert.                                            */
-/* ---------------------------------------------------------------- */
-
-void exit(int code) {
-    uart_printf("\ngdkgba_shim: exit(%d). halting.\n", (int64_t)code);
-    for (;;) __asm__ volatile ("wfi");
-}
-
-void abort(void) {
-    uart_puts("\ngdkgba_shim: abort. halting.\n");
-    for (;;) __asm__ volatile ("wfi");
-}
-
-void __assert_fail(const char *expr, const char *file, unsigned line,
-                   const char *func) {
-    uart_printf("\ngdkGBA assert FAIL: %s\n  at %s:%u in %s\n",
-                expr ? expr : "?", file ? file : "?",
-                (uint64_t)line, func ? func : "?");
-    for (;;) __asm__ volatile ("wfi");
-}
-
-/* ---------------------------------------------------------------- */
-/* String helpers (precautionary — not currently called by core).   */
-/* ---------------------------------------------------------------- */
-
-void *memchr(const void *s, int c, size_t n) {
-    const unsigned char *p = s;
-    unsigned char target = (unsigned char)c;
-    while (n--) { if (*p == target) return (void *)p; p++; }
-    return NULL;
-}
-size_t strlen(const char *s) {
-    const char *p = s;
-    while (*p) p++;
-    return (size_t)(p - s);
-}
-int strcmp(const char *a, const char *b) {
-    while (*a && *a == *b) { a++; b++; }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-int strncmp(const char *a, const char *b, size_t n) {
-    while (n && *a && *a == *b) { a++; b++; n--; }
-    if (n == 0) return 0;
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-char *strchr(const char *s, int c) {
-    while (*s) { if (*s == (char)c) return (char *)s; s++; }
-    return (c == 0) ? (char *)s : NULL;
-}
-char *strrchr(const char *s, int c) {
-    const char *last = NULL;
-    while (*s) { if (*s == (char)c) last = s; s++; }
-    if (c == 0) return (char *)s;
-    return (char *)last;
-}

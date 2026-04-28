@@ -19,6 +19,7 @@
 
 HAL      := vendor/rvvm-hal
 GDKGBA   := vendor/gdkGBA
+PICOLIBC := $(HAL)/vendor/picolibc-build/min/install
 TARGET   := riscv64-freestanding-none
 CC       := zig cc -target $(TARGET)
 OBJCOPY  := llvm-objcopy
@@ -26,14 +27,16 @@ OBJCOPY  := llvm-objcopy
 RVVM     ?= $(shell command -v rvvm 2>/dev/null || \
                     echo /home/sol/repos/RVVM/release.linux.x86_64/rvvm_x86_64)
 
-# Include order: src/ first (own headers + libc stubs), HAL headers,
-# then the gdkGBA tree last (its headers expect to be found in the
-# include path as bare names — `#include "arm.h"` etc).
+# Include order: picolibc first (so <stdio.h>, <string.h>, <assert.h>
+# resolve to the vendored libc), then src/, HAL, gdkGBA. gdkgba_shim.c
+# keeps its bump allocator, overriding picolibc's malloc at link time.
 CFLAGS   := -Os -ffreestanding -fno-stack-protector -fno-pie \
             -mcmodel=medany -nostdlib \
             -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
             -Wno-unused-function -Wno-unused-variable \
             -fcommon \
+            -DHAL_PICOLIBC \
+            -isystem $(PICOLIBC)/include \
             -Isrc/stub-libc -Isrc -I$(HAL)/include -I$(GDKGBA)
 
 # -fcommon is needed because gdkGBA's headers declare globals
@@ -44,7 +47,7 @@ CFLAGS   := -Os -ffreestanding -fno-stack-protector -fno-pie \
 # linker rejects duplicates. -fcommon restores legacy behaviour
 # without patching the vendored tree.
 
-LDFLAGS  := -nostdlib -static -Wl,-T,$(HAL)/link.ld
+LDFLAGS  := -nostdlib -static -Wl,-T,$(HAL)/link.ld -Wl,--gc-sections
 
 SCEV_OBJS   := build/main.o build/gdkgba_shim.o
 GDKGBA_OBJS := build/arm.o build/arm_mem.o build/dma.o build/io.o \
@@ -68,8 +71,11 @@ build/%.o: $(GDKGBA)/%.c
 	@mkdir -p build
 	$(CC) $(GDKGBA_CFLAGS) -c -o $@ $<
 
-$(HAL)/libhal.a:
-	$(MAKE) -C $(HAL)
+$(PICOLIBC)/lib/libc.a:
+	$(MAKE) -C $(HAL) picolibc-min
+
+$(HAL)/libhal.a: $(PICOLIBC)/lib/libc.a
+	$(MAKE) -C $(HAL) HAL_PICOLIBC=min
 
 # gdkGBA patches. Applied as a one-shot to the submodule because
 # our scev_* extensions (arm_skip_bios, IRQ-fire counters, IWRAM
@@ -83,8 +89,8 @@ $(GDKGBA)/.patched: patches/01-scev-skip-bios-and-irq-counters.patch
 
 $(GDKGBA_OBJS): $(GDKGBA)/.patched
 
-firmware.elf: $(OBJS) $(HAL)/libhal.a
-	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(HAL)/libhal.a
+firmware.elf: $(OBJS) $(HAL)/libhal.a $(PICOLIBC)/lib/libc.a
+	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(HAL)/libhal.a $(PICOLIBC)/lib/libc.a
 
 firmware.bin: firmware.elf
 	$(OBJCOPY) -O binary $< $@
