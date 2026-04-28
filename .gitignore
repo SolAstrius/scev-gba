@@ -1,0 +1,9 @@
+.direnv/
+build/
+firmware.bin
+firmware.elf
+result
+*.o
+roms/*.gba
+roms/*.sav
+saves/
