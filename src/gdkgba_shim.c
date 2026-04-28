@@ -99,6 +99,29 @@ size_t gdkgba_shim_used_bytes(void) { return bump_used; }
 size_t gdkgba_shim_pool_bytes(void) { return BUMP_POOL_BYTES; }
 
 /* ---------------------------------------------------------------- */
+/* Instruction tracer. Globals live here so the vendored arm_step / */
+/* t16_step (patched via patches/01-*.patch) can find them via the  */
+/* extern declarations there. main.c arms by writing                 */
+/* scev_trace_remaining = N. Format mirrors a mGBA `-l 0x4000` trace */
+/* well enough for hand-diffing.                                     */
+/* ---------------------------------------------------------------- */
+volatile int scev_trace_remaining = 0;
+
+static void scev_trace_default(int thumb, uint32_t pc, uint32_t op,
+                               uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3,
+                               uint32_t sp, uint32_t lr) {
+    uart_printf("T%c %x %x  r0=%x r1=%x r2=%x r3=%x sp=%x lr=%x\n",
+                (uint64_t)(thumb ? '1' : '0'),
+                (uint64_t)pc, (uint64_t)op,
+                (uint64_t)r0, (uint64_t)r1, (uint64_t)r2, (uint64_t)r3,
+                (uint64_t)sp, (uint64_t)lr);
+}
+
+void (*scev_trace_cb)(int, uint32_t, uint32_t,
+                      uint32_t, uint32_t, uint32_t, uint32_t,
+                      uint32_t, uint32_t) = scev_trace_default;
+
+/* ---------------------------------------------------------------- */
 /* exit / abort / assert.                                            */
 /* ---------------------------------------------------------------- */
 

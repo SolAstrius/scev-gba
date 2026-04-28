@@ -1,8 +1,50 @@
 diff --git a/arm.c b/arm.c
-index 6ee9b27..ceaf862 100644
+index 6ee9b27..b207693 100644
 --- a/arm.c
 +++ b/arm.c
-@@ -3265,13 +3265,44 @@ void arm_int(uint32_t address, int8_t mode) {
+@@ -3158,7 +3158,25 @@ static void t16_inc_r15() {
+         arm_r.r[15] += 2;
+ }
+ 
++/* SCEV: trace the first N executed instructions. main.c arms this
++ * by writing scev_trace_remaining = N before letting arm_exec run.
++ * Format: ARM/THUMB tag, PC of executing instr (r[15]-8 ARM,
++ * r[15]-4 THUMB), opcode, r0..r3, sp, lr. Routed through a callback
++ * the firmware installs to keep arm.c free of UART deps. */
++extern volatile int scev_trace_remaining;
++extern void (*scev_trace_cb)(int thumb, uint32_t pc, uint32_t op,
++                             uint32_t r0, uint32_t r1, uint32_t r2, uint32_t r3,
++                             uint32_t sp, uint32_t lr);
++
+ static void t16_step() {
++    /* Trace BEFORE the new fetch — at this point r[15] is PC+4 of
++     * the executing Thumb instruction. */
++    if (scev_trace_remaining > 0 && scev_trace_cb) {
++        scev_trace_remaining--;
++        scev_trace_cb(1, arm_r.r[15] - 4, arm_op,
++                      arm_r.r[0], arm_r.r[1], arm_r.r[2], arm_r.r[3],
++                      arm_r.r[13], arm_r.r[14]);
++    }
+     arm_pipe[1] = arm_fetchh(SEQUENTIAL);
+ 
+     thumb_proc[arm_op >> 5]();
+@@ -3174,6 +3192,15 @@ static void arm_inc_r15() {
+ }
+ 
+ static void arm_step() {
++    /* Trace BEFORE the new fetch — at this point r[15] is PC+8 of
++     * the executing instruction (the SEQUENTIAL fetch below would
++     * advance it to PC+12 and throw off the offset). */
++    if (scev_trace_remaining > 0 && scev_trace_cb) {
++        scev_trace_remaining--;
++        scev_trace_cb(0, arm_r.r[15] - 8, arm_op,
++                      arm_r.r[0], arm_r.r[1], arm_r.r[2], arm_r.r[3],
++                      arm_r.r[13], arm_r.r[14]);
++    }
+     arm_pipe[1] = arm_fetch(SEQUENTIAL);
+ 
+     uint32_t proc;
+@@ -3265,13 +3292,44 @@ void arm_int(uint32_t address, int8_t mode) {
      arm_load_pipe();
  }
  

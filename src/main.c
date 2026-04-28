@@ -275,12 +275,10 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
      * subsequent run_frame() calls. */
     screen = fb_bgra;
 
-    /* Skip-BIOS mode (workaround — see KNOWN_ISSUES). Bypass the
-     * BIOS splash, jump straight to cart entry. arm_skip_bios sets
-     * registers per GBATEK §3.2 BIOS-reset-defaults, reloads the
-     * pipeline from 0x08000000, and leaves IRQs enabled in CPSR. */
+    /* Skip-BIOS mode (workaround — see KNOWN_ISSUES). */
     arm_skip_bios();
-    uart_puts("Running (skip-BIOS, jumping to cart entry @ 0x08000000).\n\n");
+
+    uart_puts("Running (skip-BIOS).\n\n");
 
     uint32_t x_off = (have_gfx && g.width  > DISPLAY_W) ? (g.width  - DISPLAY_W) / 2 : 0;
     uint32_t y_off = (have_gfx && g.height > DISPLAY_H) ? (g.height - DISPLAY_H) / 2 : 0;

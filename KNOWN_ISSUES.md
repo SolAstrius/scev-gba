@@ -1,10 +1,10 @@
 # Known issues
 
-## BIOS splash hangs on most carts (Timer-1 driven path)
+## BIOS splash hangs (Timer-1 driven)
 
 The BIOS's "GAME BOY" splash IRQ handler (installed at IWRAM
-`0x03007FFC` = `0x300` for the splash phase) **only acts on
-Timer-1 IRQs** — see decoded instructions:
+`0x03007FFC` = `0x300` for the splash phase) only acts on Timer-1
+IRQs:
 
 ```
 0x300: MOV r3, #0x04000000
@@ -15,62 +15,58 @@ Timer-1 IRQs** — see decoded instructions:
 0x318: LDREQ pc, [pc, #0x79C]  ; else      → handler @ 0x210C
 ```
 
-We provide VBlank IRQs (`trigger=58/sec`, `armint=54/sec`), but the
-BIOS splash needs Timer-1 firing too. gdkGBA's `timer.c` driving
-hasn't been verified against BIOS expectations; meanwhile our
-`tmr[1].ctrl=0x0000` shows Timer 1 was never enabled.
+We provide VBlank IRQs but the BIOS expects Timer-1 too — gdkGBA's
+`tmr[1]` stays uninitialized at `ctrl=0`, so Timer 1 IRQs never fire,
+so the splash counter never advances.
 
-**Workaround**: skip the BIOS splash entirely. `arm_skip_bios()`
-in `vendor/gdkGBA/arm.c` (SCEV addition) sets registers per
-GBATEK §3.2 BIOS-reset-defaults and jumps directly to cart entry
-at `0x08000000`. Loses the boot animation; gains "everything past
-that".
+**Workaround**: skip the BIOS splash via `arm_skip_bios()` in
+`vendor/gdkGBA/arm.c` (SCEV addition). Sets registers per GBATEK §3.2
+BIOS-reset-defaults, jumps directly to `0x08000000`. Loses the boot
+animation; everything after that works normally.
 
-## FireRed (and likely other commercial carts) walks ROM linearly
+## Audio not yet wired
 
-With skip-BIOS, simple homebrew test ROMs work cleanly:
+gdkGBA's `sound.c` mix path is unconnected. Audio playback is silent.
+Wiring up `audio_pcm channels=2` on top of gdkGBA's mix output is
+straightforward (mirror the game-boy core's `push_audio` shape, plus
+HPF since GBA's APU has the same u8-zero-silence convention as DMG).
 
-- `ppu/hello.gba` (jsmolka) → PC settles at `0x08000168` (cart idle loop), `DISPCNT=0x404` (mode 4 + BG2)
-- `ppu/shades.gba` → PC settles at `0x08000164`, `DISPCNT=0x100`
+## Saves not yet wired
 
-But Pokemon FireRed goes off the rails — PC walks linearly through
-ROM at ~13 MB/sec (one prof window apart):
+gdkGBA's `eeprom`/`sram`/`flash` regions are allocated but no NVMe
+backing. Cart-type detection lives in gdkGBA's MBC code based on a
+magic-string scan of the ROM (`"SRAM_V"`, `"FLASH_V"`, `"EEPROM_V"`).
 
-```
-pc=0x08AB71FC → 0x0956E3FC → 0x0A0166CC → 0x0A6844CC → 0x0ACF22CC ...
-```
+## Status
 
-Each address is in cart-ROM space but always increasing. Diagnosis:
-gdkGBA's CPU is treating uninitialised post-cart memory as code
-(NOP-stream — PC just increments). Root cause is one of gdkGBA's
-ARM/Thumb instructions misbehaving early in FireRed's init
-sequence, leaving PC pointing past the cart's intended branch.
+What works:
+- Real commercial GBA carts boot and run after `arm_skip_bios()`.
+  Pokemon FireRed (16 MiB) and Zelda: Minish Cap (16 MiB) confirmed
+  reaching their title screens / intros.
+- Small homebrew (jsmolka's `ppu/hello.gba`, `ppu/shades.gba`) renders
+  static frames from cart code.
+- Frame loop at 60 Hz, ~10 ms run + 600 µs blit, plenty of slack.
+- Full diagnostic dump in prof line: PC, CPSR mode/I bit, halt state,
+  IE/IF/IME, DISPCNT/DISPSTAT, BIOS IntrWait completion var, IRQ
+  counters.
 
-gdkGBA describes itself as "in early stages of development" in its
-README — this is consistent with that. Commercial titles with rich
-init sequences exercise paths that simple homebrew doesn't.
+What's pending:
+- BIOS splash boot path (Timer 1 plumbing through gdkGBA)
+- Audio mix → audio_pcm
+- Save / battery RAM via NVMe disk 2
+- HID → key_input wiring is in but untested with games that read it
 
-**Where to dig next**:
+## Earlier rabbit hole, for the record
 
-1. Diff CPU instruction coverage between hello.gba's first ~50
-   instructions (works) and FireRed's first ~50 (fails). FireRed
-   does `MOV cpsr_c, IRQ`, sets up multiple banked stacks, etc.
-   `MSR cpsr_c, *` and the bank-switch path is a likely suspect.
-2. Single-step trace from `0x08000000` for the first ~200 instr
-   (add a TRACE flag to `arm_step`/`t16_step`) and compare against
-   a known-good emulator's trace.
-3. Or: vendor mGBA after all (it's more accurate but ~30× the
-   port effort — see git history for the mGBA scaffolding I
-   tried first).
-
-## What works in this firmware today
-
-- gdkGBA core builds + runs freestanding with the shim
-- BIOS loads, cart loads, framebuffer at 240×160 ×4 = 960×640
-- `arm_skip_bios()` boots straight to cart, no splash
-- Small homebrew test ROMs (hello, shades) execute and stabilise
-  in their cart idle loops with valid display state
-- Audio is **not yet wired** — the `sound.c` mix path is unconnected
-- Saves are **not yet wired** — no NVMe disk 2 detection
-- HID is wired but unused (cart code doesn't read `key_input`
-  on the homebrew ROMs we've tested)
+Before the rvvm-hal v0.8.1 fix, `nvme_read` of any single transfer
+larger than ~2 MiB silently corrupted memory: its `setup_prp` wrote
+PRP entries linearly into a 4 KiB buffer with no chain support, and
+overflowed past the buffer's end into adjacent BSS. For 16 MiB carts
+that put PRP-entry bytes (4 KiB-aligned page addresses) over the
+first ~28 KiB of `cart_buf`, and DMA'd cart data to where the PRP
+entries pointed (random spots inside `cart_buf` and elsewhere).
+Visible as: emulator's PC walking sequentially through zero-padded
+ROM end at ~13 MiB/sec. Identical pattern across FireRed and Minish
+Cap because both got the same corruption. Fixed in HAL v0.8.1 with
+proper PRP chaining + internal chunking for transfers > 32 MiB. See
+the rvvm-hal commit `8ec4e0b` for the gory details.

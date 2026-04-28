@@ -2,10 +2,10 @@
 
 Game Boy Advance (AGB / ARM7TDMI @ 16.78 MHz) on RVVM bare-metal.
 
-**Status: gdkGBA core wired, homebrew runs, commercial carts
-walk off ROM** — see `KNOWN_ISSUES.md` for the diagnostic. v1
-target was "scaffold", we got further than that; making FireRed
-boot wants either deeper gdkGBA debugging or a switch to mGBA.
+**Status: real GBA carts boot.** Pokemon FireRed and Zelda:
+Minish Cap reach their title screens / intros. Skip-BIOS workaround
+in place (the BIOS splash itself still hangs — see KNOWN_ISSUES).
+Audio + saves not yet wired.
 
 ## Why mGBA
 
