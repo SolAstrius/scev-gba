@@ -224,8 +224,24 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
 
     /* Display. 240×160 ×4 = 960×640. */
     bool have_gfx = gfx_init_fdt(&g, &fdt, DISPLAY_W, DISPLAY_H);
-    if (have_gfx) gfx_fill(&g, 0x00000000);
-    else          uart_puts("gfx: no display backend; running blind\n");
+    bool db_gfx   = false;
+    if (have_gfx) {
+        gfx_fill(&g, 0x00000000);
+        /* Page-flipped double buffer (Bochs only): the host display
+         * never reads a half-blitted frame, so the per-frame mid-blit
+         * tearing visible on cart-driven titles (FireRed, etc.)
+         * disappears. Both halves cleared so the area outside the
+         * 240x160x4 picture stays black across flips. */
+        if (gfx_enable_double_buffer(&g)) {
+            db_gfx = true;
+            gfx_fill(&g, 0x00000000);
+            gfx_flip(&g);
+            gfx_fill(&g, 0x00000000);
+            uart_puts("gfx: double-buffered\n");
+        }
+    } else {
+        uart_puts("gfx: no display backend; running blind\n");
+    }
 
     /* === BIOS === NVMe disk 1, 16 KiB exactly. */
     static nvme_t bios_disk;
@@ -307,7 +323,10 @@ void kmain(uint64_t hartid, uint64_t fdt_addr) {
         uint64_t t1 = time_now();
         prof_run += t1 - t0;
 
-        if (have_gfx) blit_frame(x_off, y_off);
+        if (have_gfx) {
+            blit_frame(x_off, y_off);
+            if (db_gfx) gfx_flip(&g);
+        }
         uint64_t t2 = time_now();
         prof_blit += t2 - t1;
 
